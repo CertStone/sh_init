@@ -11,7 +11,7 @@ set -euo pipefail # 发生错误时立即退出，未定义变量时报错，管
 COLOR_RESET='\033[0m'
 
 # 提示信息前缀
-LOG_PREFIX="[INFO]"
+# LOG_PREFIX="[INFO]" # 删除此行
 
 # 日志级别
 LOG_LEVEL=3 # 1=错误 2=警告 3=信息
@@ -22,13 +22,14 @@ log() {
   shift
   if (( level <= LOG_LEVEL )); then
     local color
+    local current_prefix
     case "$level" in
-      1) color="\033[31m" ;; # 红色
-      2) color="\033[33m" ;; # 黄色
-      3) color="\033[32m" ;; # 绿色
-      *) color="\033[0m" ;;  # 默认
+      1) color="\033[31m"; current_prefix="[ERROR]" ;; # 红色
+      2) color="\033[33m"; current_prefix="[WARN ]" ;; # 黄色
+      3) color="\033[32m"; current_prefix="[INFO ]" ;; # 绿色
+      *) color="\033[0m";  current_prefix="[LOG  ]" ;;  # 默认
     esac
-    echo -e "${color}${LOG_PREFIX} $*${COLOR_RESET}"
+    echo -e "${color}${current_prefix} $*${COLOR_RESET}"
   fi
 }
 
@@ -745,6 +746,17 @@ EOF
       log_success "proxy/unproxy 辅助函数已添加到 $zshrc_file。"
       log_info "默认 SOCKS5 代理设置为 127.0.0.1:1089, HTTP/HTTPS 代理设置为 127.0.0.1:1080。"
       log_info "您可以编辑 $zshrc_file 中的 proxy 函数以修改默认端口。"
+      log_info ""
+      log_info "用法说明:"
+      log_info "  在终端中执行 'proxy' 命令来启用代理。"
+      log_info "  在终端中执行 'unproxy' 命令来禁用代理。"
+      log_info "适用场景:"
+      log_info "  当您需要在命令行环境下通过代理访问网络时，例如："
+      log_info "  - 使用 curl、wget 下载文件"
+      log_info "  - 使用 git 克隆或推送代码到需要代理的仓库"
+      log_info "  - 使用 pip, npm, go get 等包管理器安装依赖"
+      log_info "  请注意：这些函数设置的是当前终端会话的环境变量，通常只对命令行工具生效。"
+      log_info "  它们可能不会影响图形界面应用程序的网络设置。"
     else
       log_info "跳过添加 proxy/unproxy 辅助函数。"
     fi

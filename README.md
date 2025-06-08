@@ -45,22 +45,21 @@
 
 您可以使用以下任一命令直接下载并执行脚本：
 
-*   **使用 curl:**
+*   **使用 curl (GitHub):**
     ```bash
     bash <(curl -fsSL https://raw.githubusercontent.com/GitHubsAdministrator/sh_init/main/sh_init.sh)
     ```
-    或者
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/GitHubsAdministrator/sh_init/main/sh_init.sh | bash
-    ```
-
-*   **使用 wget:**
+*   **使用 wget (GitHub):**
     ```bash
     bash <(wget -qO- https://raw.githubusercontent.com/GitHubsAdministrator/sh_init/main/sh_init.sh)
     ```
-    或者
+*   **使用 curl (Gitee 镜像 - 中国大陆用户推荐):**
     ```bash
-    wget -qO- https://raw.githubusercontent.com/GitHubsAdministrator/sh_init/main/sh_init.sh | bash
+    bash <(curl -fsSL https://gitee.com/wo99/sh_init/raw/main/sh_init.sh)
+    ```
+*   **使用 wget (Gitee 镜像 - 中国大陆用户推荐):**
+    ```bash
+    bash <(wget -qO- https://gitee.com/wo99/sh_init/raw/main/sh_init.sh)
     ```
     
 

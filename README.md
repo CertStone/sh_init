@@ -107,6 +107,10 @@
 
 *   Gemini 2.5 Pro (Preview)
 
+## 其他脚本
+
+一键安装tailscale+derper：https://gitee.com/wo99/sh_init/tree/main/tailscale
+
 ## 运行日志概览
 
 以下是一次典型的脚本运行交互和主要输出的概览（已省略部分详细的软件包安装过程）：

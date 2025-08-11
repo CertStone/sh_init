@@ -76,6 +76,41 @@ command_exists() {
   command -v "$1" &>/dev/null
 }
 
+# --- 系统识别：统一获取 OS 与代号 ---
+detect_os_and_codename() {
+  # 全局变量：OS_ID_LC, OS_NAME, OS_VERSION_ID, CODENAME
+  local id="" name="" version_id="" codename=""
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    id="${ID:-}"
+    name="${NAME:-}"
+    version_id="${VERSION_ID:-}"
+    codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+  fi
+  # 回退到 lsb_release（忽略其噪声输出）
+  if [[ -z "$id" ]] && command_exists lsb_release; then
+    id="$(lsb_release -is 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+  fi
+  if [[ -z "$codename" ]] && command_exists lsb_release; then
+    codename="$(lsb_release -sc 2>/dev/null || true)"
+  fi
+  # Debian 再次回退
+  if [[ -z "$codename" && "$id" == "debian" && -r /etc/debian_version ]]; then
+    local debv
+    debv="$(cut -d'/' -f1 /etc/debian_version 2>/dev/null || true)"
+    case "$debv" in
+      12*|bookworm) codename="bookworm" ;;
+      11*|bullseye) codename="bullseye" ;;
+      10*|buster)   codename="buster" ;;
+      9*|stretch)   codename="stretch" ;;
+    esac
+  fi
+  OS_ID_LC="${id,,}"
+  OS_NAME="$name"
+  OS_VERSION_ID="$version_id"
+  CODENAME="$codename"
+}
+
 # 批量安装缺失的软件包 (Debian/Ubuntu)
 install_pkgs_if_needed() {
   local missing_pkgs=()
@@ -187,31 +222,67 @@ select_git_clone_source() {
 # --- 更换 APT 源 (Debian/Ubuntu) ---
 use_china_apt_mirror() {
   log_info "开始配置国内 APT 镜像源..."
-  install_pkgs_if_needed lsb-release # 确保 lsb-release 可用
+  install_pkgs_if_needed lsb-release || true # lsb_release 非必需，仅作为补充
 
-  local codename
-  codename=$(lsb_release -sc)
+  detect_os_and_codename
+  local os_id_lc="$OS_ID_LC" codename="$CODENAME"
   if [[ -z "$codename" ]]; then
     log_error "无法获取系统代号 (codename)，跳过 APT 镜像配置。"
     return 1
   fi
-  log_info "当前系统代号: $codename"
+  log_info "当前系统: ${OS_NAME:-$os_id_lc} ($codename)"
 
-  local mirrors=(
-    "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
-    "https://mirrors.aliyun.com/ubuntu/"
-    "https://mirrors.ustc.edu.cn/ubuntu/"
-    "http://mirrors.163.com/ubuntu/"
-    "http://cn.archive.ubuntu.com/ubuntu/" # 官方中国镜像
-  )
-  local mirror_descs=(
-    "清华大学 TUNA 镜像"
-    "阿里云镜像"
-    "中国科学技术大学镜像"
-    "网易镜像"
-    "Ubuntu 官方中国镜像"
-  )
-  local chosen_mirror
+  # 根据系统选择不同的镜像源
+  local mirrors=() mirror_descs=()
+  if [[ "$os_id_lc" == "ubuntu" ]]; then
+    mirrors=(
+      "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
+      "https://mirrors.aliyun.com/ubuntu/"
+      "https://mirrors.ustc.edu.cn/ubuntu/"
+      "http://mirrors.163.com/ubuntu/"
+      "http://cn.archive.ubuntu.com/ubuntu/" # 官方中国镜像
+    )
+    mirror_descs=(
+      "清华大学 TUNA 镜像"
+      "阿里云镜像"
+      "中国科学技术大学镜像"
+      "网易镜像"
+      "Ubuntu 官方中国镜像"
+    )
+  elif [[ "$os_id_lc" == "debian" ]]; then
+    mirrors=(
+      "https://mirrors.tuna.tsinghua.edu.cn/debian/"
+      "https://mirrors.aliyun.com/debian/"
+      "https://mirrors.ustc.edu.cn/debian/"
+      "http://mirrors.163.com/debian/"
+      "https://deb.debian.org/debian/" # 官方主仓
+    )
+    mirror_descs=(
+      "清华大学 TUNA 镜像"
+      "阿里云镜像"
+      "中国科学技术大学镜像"
+      "网易镜像"
+      "Debian 官方主仓"
+    )
+  else
+    log_warning "未识别的系统 ${OS_NAME:-$os_id_lc}，按 Ubuntu 处理镜像。"
+    mirrors=(
+      "https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
+      "https://mirrors.aliyun.com/ubuntu/"
+      "https://mirrors.ustc.edu.cn/ubuntu/"
+      "http://mirrors.163.com/ubuntu/"
+      "http://cn.archive.ubuntu.com/ubuntu/"
+    )
+    mirror_descs=(
+      "清华大学 TUNA 镜像"
+      "阿里云镜像"
+      "中国科学技术大学镜像"
+      "网易镜像"
+      "Ubuntu 官方中国镜像"
+    )
+  fi
+
+  local chosen_mirror security_mirror
 
   PS3="请选择 APT 镜像源编号 (默认为 1. 清华大学): "
   select desc in "${mirror_descs[@]}"; do
@@ -227,6 +298,21 @@ use_china_apt_mirror() {
       log_warning "无效选择，请重新输入。"
     fi
   done
+
+  # 计算 security 仓库地址
+  if [[ "$os_id_lc" == "debian" ]]; then
+    if [[ "$chosen_mirror" =~ deb\.debian\.org ]]; then
+      security_mirror="https://security.debian.org/debian-security"
+    else
+      if [[ "$chosen_mirror" == */debian/ ]]; then
+        security_mirror="${chosen_mirror%debian/}debian-security/"
+      else
+        security_mirror="https://security.debian.org/debian-security"
+      fi
+    fi
+  else
+    security_mirror="$chosen_mirror"
+  fi
 
   local sources_list_target="/etc/apt/sources.list" # 默认目标文件
   local is_deb822_format=false
@@ -284,10 +370,8 @@ use_china_apt_mirror() {
       # 为了简化，我们这里如果 /etc/apt/sources.list 不是有效的 DEB822，就按传统格式处理。
     else
       log_info "$sources_list_target 为空或不存在。将为 $sources_list_target 生成传统格式。"
-      # is_deb822_format 保持 false
     fi
   fi
-
 
   # 备份逻辑
   local backup_file_path="${sources_list_target}.bak.$(date +%Y%m%d-%H%M%S)"
@@ -307,7 +391,6 @@ use_china_apt_mirror() {
     log_info "$sources_list_target 不存在，无需备份。"
   fi
 
-
   log_info "正在写入新的 $sources_list_target..."
   local sources_content=""
 
@@ -318,41 +401,63 @@ use_china_apt_mirror() {
       log_info "目标文件是 ${sources_list_target}，将强制使用 DEB822 格式。"
   fi
 
+  local keyring_path="" signed_by_line=""
+  if [[ "$os_id_lc" == "ubuntu" ]] && [[ -f "/usr/share/keyrings/ubuntu-archive-keyring.gpg" ]]; then
+    keyring_path="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+  elif [[ "$os_id_lc" == "debian" ]] && [[ -f "/usr/share/keyrings/debian-archive-keyring.gpg" ]]; then
+    keyring_path="/usr/share/keyrings/debian-archive-keyring.gpg"
+  else
+    if [[ -f "/usr/share/keyrings/ubuntu-archive-keyring.gpg" ]]; then
+      keyring_path="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+      log_warning "操作系统为 '$os_id'。使用 Ubuntu 密钥环作为回退: $keyring_path"
+    elif [[ -f "/usr/share/keyrings/debian-archive-keyring.gpg" ]]; then
+      keyring_path="/usr/share/keyrings/debian-archive-keyring.gpg"
+      log_warning "操作系统为 '$os_id'。使用 Debian 密钥环作为回退: $keyring_path"
+    fi
+  fi
+  if [[ -n "$keyring_path" ]]; then
+    signed_by_line="Signed-By: ${keyring_path}"
+  else
+    log_warning "无法自动确定或找到 GPG 密钥环路径。生成的 DEB822 配置中将省略 'Signed-By'。"
+    log_warning "这可能导致 APT 无法验证仓库。您可能需要手动编辑 $sources_list_target 并添加正确的 'Signed-By' 行。"
+  fi
+
+  # 写入内容前准备组件列表（避免 set -u 未定义）
+  local components_ubuntu="main restricted universe multiverse"
+  local components_debian="main contrib non-free"
+  if [[ "$os_id_lc" == "debian" ]]; then
+    local major="${OS_VERSION_ID%%.*}"
+    if [[ -n "$major" && "$major" -ge 12 ]]; then
+      components_debian+=" non-free-firmware"
+    fi
+  fi
 
   if $is_deb822_format; then
-    local os_id
-    os_id=$(lsb_release -is 2>/dev/null || echo "Unknown")
-    local keyring_path=""
+    if [[ "$os_id_lc" == "debian" ]]; then
+      sources_content=$(cat <<EOF
+# Source: Script generated by configuration script (Debian)
+Types: deb
+URIs: ${chosen_mirror}
+Suites: ${codename} ${codename}-updates ${codename}-backports
+Components: ${components_debian}
+${signed_by_line}
+Architectures: $(dpkg --print-architecture)
 
-    if [[ "$os_id" == "Ubuntu" ]] && [[ -f "/usr/share/keyrings/ubuntu-archive-keyring.gpg" ]]; then
-      keyring_path="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-    elif [[ "$os_id" == "Debian" ]] && [[ -f "/usr/share/keyrings/debian-archive-keyring.gpg" ]]; then
-      keyring_path="/usr/share/keyrings/debian-archive-keyring.gpg"
+Types: deb
+URIs: ${security_mirror}
+Suites: ${codename}-security
+Components: ${components_debian}
+${signed_by_line}
+Architectures: $(dpkg --print-architecture)
+EOF
+)
     else
-      # 尝试通用回退密钥环路径
-      if [[ -f "/usr/share/keyrings/ubuntu-archive-keyring.gpg" ]]; then
-          keyring_path="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-          log_warning "操作系统为 '$os_id'。使用 Ubuntu 密钥环作为回退: $keyring_path"
-      elif [[ -f "/usr/share/keyrings/debian-archive-keyring.gpg" ]]; then
-          keyring_path="/usr/share/keyrings/debian-archive-keyring.gpg"
-          log_warning "操作系统为 '$os_id'。使用 Debian 密钥环作为回退: $keyring_path"
-      fi
-    fi
-
-    local signed_by_line=""
-    if [[ -n "$keyring_path" ]]; then
-        signed_by_line="Signed-By: ${keyring_path}"
-    else
-        log_warning "无法自动确定或找到 GPG 密钥环路径。生成的 DEB822 配置中将省略 'Signed-By'。"
-        log_warning "这可能导致 APT 无法验证仓库。您可能需要手动编辑 $sources_list_target 并添加正确的 'Signed-By' 行。"
-    fi
-
-    sources_content=$(cat <<EOF
-# Source: Script generated by configuration script
+      sources_content=$(cat <<EOF
+# Source: Script generated by configuration script (Ubuntu)
 Types: deb
 URIs: ${chosen_mirror}
 Suites: ${codename} ${codename}-updates ${codename}-security ${codename}-backports
-Components: main restricted universe multiverse
+Components: ${components_ubuntu}
 ${signed_by_line}
 Architectures: $(dpkg --print-architecture)
 
@@ -360,28 +465,46 @@ Architectures: $(dpkg --print-architecture)
 # Types: deb-src
 # URIs: ${chosen_mirror}
 # Suites: ${codename} ${codename}-updates ${codename}-security ${codename}-backports
-# Components: main restricted universe multiverse
+# Components: ${components_ubuntu}
 # ${signed_by_line}
 # Architectures: $(dpkg --print-architecture)
 EOF
 )
-  else # 传统格式
-    sources_content=$(cat <<EOF
-deb ${chosen_mirror} ${codename} main restricted universe multiverse
-deb ${chosen_mirror} ${codename}-updates main restricted universe multiverse
-deb ${chosen_mirror} ${codename}-security main restricted universe multiverse
-deb ${chosen_mirror} ${codename}-backports main restricted universe multiverse
-# deb-src ${chosen_mirror} ${codename} main restricted universe multiverse
-# deb-src ${chosen_mirror} ${codename}-updates main restricted universe multiverse
-# deb-src ${chosen_mirror} ${codename}-security main restricted universe multiverse
-# deb-src ${chosen_mirror} ${codename}-backports main restricted universe multiverse
+    fi
+  else
+    if [[ "$os_id_lc" == "debian" ]]; then
+      sources_content=$(cat <<EOF
+deb ${chosen_mirror} ${codename} ${components_debian}
+deb ${chosen_mirror} ${codename}-updates ${components_debian}
+deb ${security_mirror} ${codename}-security ${components_debian}
+deb ${chosen_mirror} ${codename}-backports ${components_debian}
+# deb-src ${chosen_mirror} ${codename} ${components_debian}
+# deb-src ${chosen_mirror} ${codename}-updates ${components_debian}
+# deb-src ${security_mirror} ${codename}-security ${components_debian}
+# deb-src ${chosen_mirror} ${codename}-backports ${components_debian}
 EOF
 )
+    else
+      sources_content=$(cat <<EOF
+deb ${chosen_mirror} ${codename} ${components_ubuntu}
+deb ${chosen_mirror} ${codename}-updates ${components_ubuntu}
+deb ${chosen_mirror} ${codename}-security ${components_ubuntu}
+deb ${chosen_mirror} ${codename}-backports ${components_ubuntu}
+# deb-src ${chosen_mirror} ${codename} ${components_ubuntu}
+# deb-src ${chosen_mirror} ${codename}-updates ${components_ubuntu}
+# deb-src ${chosen_mirror} ${codename}-security ${components_ubuntu}
+# deb-src ${chosen_mirror} ${codename}-backports ${components_ubuntu}
+EOF
+)
+    fi
   fi
 
   # 创建目标目录以防万一（主要针对 .list.d/ 中的文件）
   sudo mkdir -p "$(dirname "$sources_list_target")"
   echo "$sources_content" | sudo tee "$sources_list_target" >/dev/null || { log_error "写入 $sources_list_target 失败!"; return 1; }
+
+  log_info "清理可能存在的旧 Docker APT 源配置，以防干扰..."
+  sudo rm -f /etc/apt/sources.list.d/docker.list
 
   log_info "更新 APT 软件包列表..."
   sudo apt-get update -qq || { log_warning "APT 更新失败，可能是镜像源问题或网络问题。请检查 $sources_list_target 或稍后手动执行 'sudo apt-get update'。"; return 1; }
@@ -620,7 +743,6 @@ install_zsh_plugins() {
 
   # 核心插件列表 (OMZ 内建或需克隆)
   # 格式: plugin_name[:repo_path_if_external]
-  # repo_path_if_external 是 user/repo 格式
   local core_plugins=(
     "git"  # OMZ 内建
     "z"    # OMZ 内建 (替代 fasd/autojump)
@@ -767,18 +889,46 @@ EOF
 
 install_docker_and_config() {
   log_info "开始安装 Docker CE 并配置镜像加速..."
-  sudo apt-get update -qq
-  install_pkgs_if_needed apt-transport-https ca-certificates curl gnupg-agent software-properties-common jq # ADDED jq as a dependency for daemon.json merging
+  # 确保每次都从干净的状态开始，避免旧的错误配置干扰
+  sudo rm -f /etc/apt/sources.list.d/docker.list
 
-  # 选择 Docker CE APT 安装源
+  # 先安装依赖，再进行 apt-get update
+  install_pkgs_if_needed apt-transport-https ca-certificates curl gnupg-agent software-properties-common jq
+
+  detect_os_and_codename
+  local os_id_lc="$OS_ID_LC" codename="$CODENAME"
+  log_info "Docker 安装程序检测到系统: ${OS_NAME:-$os_id_lc} ($codename)"
+
+  # 更稳健的回退：如果全局变量为空，则再次尝试检测
+  if [[ -z "$os_id_lc" ]] && [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    os_id_lc="${ID,,}"
+    [[ -z "$codename" ]] && codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+  fi
+  if [[ -z "$os_id_lc" ]]; then
+    if [[ -r /etc/debian_version ]]; then os_id_lc="debian"; else os_id_lc="ubuntu"; fi
+  fi
+
+  # 选择 Docker CE APT 安装源（按系统切换路径）
+  local sources urls
   if ask_yes_no "是否使用国内 Docker CE APT 镜像源安装 Docker CE?[Y/n]" "Y"; then
-    local sources=("阿里云" "清华 TUNA" "中科大 USTC" "官方")
-    local urls=(
-      "https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
-      "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/ubuntu"
-      "https://mirrors.ustc.edu.cn/docker-ce/linux/ubuntu"
-      "https://download.docker.com/linux/ubuntu"
-    )
+    if [[ "$os_id_lc" == "debian" ]]; then
+      sources=("阿里云" "清华 TUNA" "中科大 USTC" "官方")
+      urls=(
+        "https://mirrors.aliyun.com/docker-ce/linux/debian"
+        "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian"
+        "https://mirrors.ustc.edu.cn/docker-ce/linux/debian"
+        "https://download.docker.com/linux/debian"
+      )
+    else
+      sources=("阿里云" "清华 TUNA" "中科大 USTC" "官方")
+      urls=(
+        "https://mirrors.aliyun.com/docker-ce/linux/ubuntu"
+        "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/ubuntu"
+        "https://mirrors.ustc.edu.cn/docker-ce/linux/ubuntu"
+        "https://download.docker.com/linux/ubuntu"
+      )
+    fi
     PS3="请选择 Docker CE APT 源 (默认 阿里云): "
     select src in "${sources[@]}"; do
       if [[ -n "$src" ]]; then
@@ -793,28 +943,31 @@ install_docker_and_config() {
       fi
     done
     log_info "添加 Docker CE 源: $src ($mirror_base)"
-    
-    # 创建keyrings目录
-    sudo mkdir -p /etc/apt/keyrings
-    # 下载并安装GPG密钥到keyrings目录
-    curl -fsSL "$mirror_base/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-      || { log_error "添加 Docker GPG key 失败"; return 1; }
-    # 使用signed-by选项引用密钥
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] $mirror_base $(lsb_release -cs) stable" | \
-      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null \
-      || { log_error "添加 Docker apt 源失败"; return 1; }
   else
     log_info "使用官方 Docker CE APT 源安装。"
-    # 创建keyrings目录
-    sudo mkdir -p /etc/apt/keyrings
-    # 下载并安装GPG密钥到keyrings目录
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-      || { log_error "添加官方 Docker GPG key 失败"; return 1; }
-    # 使用signed-by选项引用密钥
-    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null \
-      || { log_error "添加官方 Docker apt 源失败"; return 1; }
+    if [[ "$os_id_lc" == "debian" ]]; then
+      mirror_base="https://download.docker.com/linux/debian"
+    else
+      mirror_base="https://download.docker.com/linux/ubuntu"
+    fi
   fi
+
+  # 路径矫正，防止系统判断问题导致路径不一致
+  if [[ "$os_id_lc" == "debian" ]]; then
+    mirror_base="${mirror_base/linux\/ubuntu/linux/debian}"
+  elif [[ "$os_id_lc" == "ubuntu" ]]; then
+    mirror_base="${mirror_base/linux\/debian/linux/ubuntu}"
+  fi
+
+  sudo mkdir -p /etc/apt/keyrings
+  curl -fsSL "$mirror_base/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    || { log_error "添加 Docker GPG key 失败"; return 1; }
+
+  local arch
+  arch="$(dpkg --print-architecture)"
+  echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] $mirror_base ${codename} stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    || { log_error "添加 Docker apt 源失败"; return 1; }
 
   sudo apt-get update -qq
   sudo apt-get install -y docker-ce docker-ce-cli containerd.io \

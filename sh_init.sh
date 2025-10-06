@@ -893,7 +893,7 @@ install_docker_and_config() {
   sudo rm -f /etc/apt/sources.list.d/docker.list
 
   # 先安装依赖，再进行 apt-get update
-  install_pkgs_if_needed apt-transport-https ca-certificates curl gnupg-agent software-properties-common jq
+  install_pkgs_if_needed apt-transport-https ca-certificates curl gnupg-agent jq
 
   detect_os_and_codename
   local os_id_lc="$OS_ID_LC" codename="$CODENAME"

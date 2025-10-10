@@ -54,7 +54,11 @@
 
 #### **4. 使用步骤**
 
+0. [推荐]创建文件夹
 
+  ```bash
+  mkdir -p derper-docker && cd derper-docker
+  ```
 
 1. 下载脚本:
 

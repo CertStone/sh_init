@@ -1,3 +1,6 @@
+# tailscale 脚本已停止维护！！！
+
+
 ### **自动化 Tailscale + DERP 节点部署脚本 - 使用文档**
 
 

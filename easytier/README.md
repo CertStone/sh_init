@@ -14,7 +14,7 @@
 # 下载脚本
 curl -fsSL https://raw.githubusercontent.com/CertStone/sh_init/main/easytier/deploy.sh -o deploy.sh
 chmod +x deploy.sh
-# 国内线路可选 curl -fsSL https://raw.githubusercontent.com/CertStone/sh_init/main/easytier/deploy.sh -o deploy.sh && chmod +x deploy.sh
+# 国内线路可选 curl -fsSL https://gitee.com/wo99/sh_init/raw/main/easytier/deploy.sh -o deploy.sh && chmod +x deploy.sh
 
 # 安装（交互式输入启动参数）
 sudo ./deploy.sh

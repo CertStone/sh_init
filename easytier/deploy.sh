@@ -9,10 +9,11 @@
 #
 # 用法:
 #   sudo ./deploy.sh [install] [安装路径] [选项]
+#   sudo ./deploy.sh update
 #   sudo ./deploy.sh uninstall
 #
 # 选项:
-#   --exec-args "<args>"   非交互指定启动参数（easytier-core 之后的全部命令行）
+#   --exec-args "<args>"   非交互指定启动参数（install 用；update 会忽略并复用旧参数）
 #   --no-gh-proxy          强制直连 GitHub，不探测镜像
 #   --gh-proxy <URL>       强制使用指定镜像站（拼在 GitHub URL 之前）
 #
@@ -52,7 +53,8 @@ HELP() {
   echo "用法: sudo $0 [command] [安装路径] [options]"
   echo
   echo "Commands:"
-  echo "  install    下载并安装 EasyTier，配置开机自启（默认）"
+  echo "  install    下载并安装 EasyTier，配置开机自启（默认；需要启动参数）"
+  echo "  update     升级到最新版（只换二进制，保持启动参数不变，不提示输入）"
   echo "  uninstall  卸载 EasyTier 及其服务"
   echo "  help       显示本帮助"
   echo
@@ -233,6 +235,31 @@ TIP
   done
 }
 
+# ---------- 读取已持久化的启动参数（升级时复用）----------
+# 从 ${INSTALL_PATH}/easytier.args 读取，该文件首字段是 easytier-core 路径，
+# 其余为启动参数。成功置 EXEC_ARGS 并返回 0。
+load_persisted_args() {
+  local args_file="${INSTALL_PATH}/easytier.args"
+  if [ ! -f "$args_file" ]; then
+    return 1
+  fi
+  # 读第一行，去掉首字段（easytier-core 路径）与首尾空白
+  local line
+  line="$(head -n 1 "$args_file" 2>/dev/null | tr -d '\r')" || return 1
+  [ -z "$line" ] && return 1
+  # 去掉首个 token（程序路径），保留其后的参数
+  local rest="${line#* }"
+  # 若原行无空格（只有程序路径无参数），${line#* } 会等于 $line 本身
+  if [ "$rest" = "$line" ]; then
+    rest=''
+  fi
+  EXEC_ARGS="$(printf '%s' "$rest" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if ! validate_exec_args "$EXEC_ARGS"; then
+    return 1
+  fi
+  return 0
+}
+
 # ---------- 原子写文件（先写临时文件再 mv）----------
 write_atomic() {
   local dest="$1"; shift
@@ -359,6 +386,18 @@ download_to_stage() {
   return 0
 }
 
+# ---------- 读取本地已安装版本 ----------
+# 通过 easytier-core --version 解析；成功置 LOCAL_VERSION 并返回 0。
+LOCAL_VERSION=''
+get_local_version() {
+  local core_bin="${INSTALL_PATH}/easytier-core"
+  [ -x "$core_bin" ] || return 1
+  # easytier-core --version 输出形如 "easytier-core 2.6.4" 或含 git hash
+  LOCAL_VERSION="$("$core_bin" --version 2>/dev/null | head -n 1 | awk '{print $2}' | tr -d '[:space:]')"
+  [ -n "$LOCAL_VERSION" ] || return 1
+  return 0
+}
+
 # ---------- 验证服务确实起来了 ----------
 verify_service_running() {
   local i st
@@ -476,6 +515,71 @@ UNIT
   fi
 }
 
+# ---------- 升级（只换二进制，保持配置）----------
+# 与 install 的区别：不提示/不接受启动参数，直接复用已持久化的
+# ${INSTALL_PATH}/easytier.args；systemd 单元不重写（参数未变）。
+update() {
+  local core_bin="${INSTALL_PATH}/easytier-core"
+  [ -f "$core_bin" ] || die "未在 ${INSTALL_PATH} 找到 EasyTier，无法升级。请先用 install 安装。"
+
+  # 1) 复用已持久化的启动参数（不提示用户输入）
+  if ! load_persisted_args; then
+    die "未找到或非法的持久化参数 (${INSTALL_PATH}/easytier.args)。若需修改启动参数，请用 'install' 重装。"
+  fi
+  info "复用启动参数: easytier-core ${EXEC_ARGS}"
+
+  # 2) 版本对比：已是最新则跳过
+  get_local_version
+  fetch_latest_version || die '所有源均无法获取最新版本号。请检查网络，或使用 --gh-proxy 指定可用镜像。'
+  if [ -n "${LOCAL_VERSION:-}" ]; then
+    # 标准化比较（去掉前导 v）
+    local lv="${LOCAL_VERSION#v}" rv="${VERSION#v}"
+    if [ "$lv" = "$rv" ]; then
+      info "已是最新版本 ${VERSION}，无需升级。"
+      exit 0
+    else
+      info "当前 ${LOCAL_VERSION} → 最新 ${VERSION}，开始升级。"
+    fi
+  else
+    warn "无法解析本地版本号，继续下载最新版覆盖。"
+  fi
+
+  # 3) 下载到暂存目录（不触碰安装目录，中断安全）
+  STAGE_DIR="$(mktemp -d /tmp/easytier_stage.XXXXXX)"
+  resolve_download_url || die '无法确定可用的下载源，已退出。'
+  info "下载地址: ${DOWNLOAD_URL}"
+  download_to_stage || die '下载/解压失败，既有安装与服务未被触碰。'
+
+  # 4) 原子替换二进制（单文件 rename）
+  info "替换二进制到 ${INSTALL_PATH} ..."
+  rm -rf "${INSTALL_PATH}/easytier-linux-${ARCH}"
+  mv -f "${STAGE_BIN_DIR}"/* "$INSTALL_PATH/" 2>/dev/null || true
+  chmod +x "${INSTALL_PATH}/easytier-core" 2>/dev/null || true
+  [ -f "${INSTALL_PATH}/easytier-cli" ] && chmod +x "${INSTALL_PATH}/easytier-cli"
+  rm -rf "$STAGE_DIR"; STAGE_DIR=''
+
+  # 5) 软链刷新（指向同一路径，通常无需变，保持幂等）
+  ln -sf "${INSTALL_PATH}/easytier-core" /usr/sbin/easytier-core
+  [ -f "${INSTALL_PATH}/easytier-cli" ] && ln -sf "${INSTALL_PATH}/easytier-cli" /usr/sbin/easytier-cli
+
+  # 6) 重启服务（参数未变，单元文件无需重写）
+  systemctl daemon-reload
+  systemctl restart easytier || warn 'systemctl restart 失败。'
+
+  echo
+  info '✓ 二进制已更新'
+  echo -e "  安装路径: ${GREEN}${INSTALL_PATH}${RES}"
+  echo -e "  启动参数: ${GREEN}easytier-core ${EXEC_ARGS}${RES}（未改动）"
+  echo
+
+  if verify_service_running; then
+    info "✓ EasyTier 已升级到 ${VERSION} 并重启成功！"
+  else
+    err '⚠ 升级完成但服务未正常运行。请用 journalctl -u easytier 排查。'
+    exit 1
+  fi
+}
+
 # ---------- 卸载 ----------
 uninstall() {
   info '正在卸载 EasyTier ...'
@@ -500,6 +604,7 @@ uninstall() {
 # ---------- 入口 ----------
 case "$COMMAND" in
   install)   install ;;
+  update)    update ;;
   uninstall) uninstall ;;
   *)
     err "未知命令: ${COMMAND}"

@@ -4,7 +4,6 @@
 配置开机自启服务。**启动参数完全由用户输入**，可用于任意组网场景（配置服务器、
 直连 peer、配置文件等）。
 
-> 适用于无法访问官方 Web 管理台、或希望在纯命令行下完成部署的场景。
 > 需 root、`curl`、`unzip`，以及 systemd。
 
 ---
@@ -22,6 +21,9 @@ sudo ./deploy.sh
 # 或直接指定启动参数与安装路径
 sudo ./deploy.sh install /opt/easytier \
   --exec-args "-w udp://your-config-server:65432/your-token --machine-id my-host-001"
+
+# 升级（只换二进制，保持启动参数不变，不提示输入）
+sudo ./deploy.sh update
 
 # 卸载
 sudo ./deploy.sh uninstall
@@ -41,7 +43,8 @@ sudo ./deploy.sh [command] [安装路径] [options]
 
 | 命令 | 说明 |
 |---|---|
-| `install` | 下载并安装 EasyTier，配置开机自启（默认，可省略） |
+| `install` | 下载并安装 EasyTier，配置开机自启（默认，可省略；需要启动参数） |
+| `update` | 升级到最新版（只换二进制，**保持启动参数不变，不提示输入**） |
 | `uninstall` | 卸载 EasyTier 及其服务、清理文件 |
 | `help` | 显示帮助 |
 
@@ -163,7 +166,16 @@ journalctl -u easytier -f        # 实时日志
 
 ## 原理说明
 
-脚本按以下流程工作，每个阶段都设计为**中断安全**和**幂等**：
+脚本提供 `install`（安装/重装）与 `update`（升级）两个命令，区别在于**是否重新获取启动参数**：
+
+| | `install` | `update` |
+|---|---|---|
+| 启动参数来源 | 用户输入（CLI > 环境变量 > 交互提示） | 复用 `${INSTALL_PATH}/easytier.args`（**不提示输入**） |
+| systemd 单元 | 重写（参数可能变了） | 不动（参数未变） |
+| 版本对比 | 否（重装即重下） | 是，已是最新则跳过 |
+| 适用场景 | 首装、改参数、修复 | 日常升级 |
+
+### install 流程
 
 ```
 ┌─ 前置检查（root / curl / unzip / systemd / 平台）
@@ -179,6 +191,19 @@ journalctl -u easytier -f        # 实时日志
 └─ 轮询 is-active 验证服务（失败则打印 journalctl 日志并退出非零）
 ```
 
+### update 流程
+
+```
+┌─ 前置检查（同 install）
+├─ 复用持久化参数（读 easytier.args；无则报错引导用 install）
+├─ 读取本地版本（easytier-core --version）+ 获取最新版本
+├─ 版本对比：相同则直接退出（无需升级）
+├─ 解析下载源 → 下载到暂存目录 → 校验
+├─ 原子替换二进制（mv；systemd 单元不动）
+├─ 刷新 /usr/sbin 软链 → daemon-reload → restart
+└─ 轮询 is-active 验证服务
+```
+
 ### 关键设计
 
 - **暂存目录隔离**：下载和解压在 `mktemp -d` 创建的私有目录中完成，确认二进制
@@ -189,7 +214,10 @@ journalctl -u easytier -f        # 实时日志
 - **镜像自动探测**：解决 GitHub 在国内等网络不可达的问题，仅在直连失败时才走镜像。
 - **服务状态验证**：`Type=simple` 下 `restart` 立即返回不代表进程稳定，脚本会轮询
   `is-active`，失败时打印最近日志，**不谎报成功**。
-- **幂等**：重复运行 = 升级（重新下载、原子覆盖二进制、重写单元、重启服务）。
+- **幂等**：`install` 重复运行会重新下载、原子覆盖二进制、重写单元、重启服务；
+  `update` 重复运行时若版本未变则直接跳过。
+- **参数持久化**：`install` 把启动参数写入 `${INSTALL_PATH}/easytier.args`，
+  供 `update` 复用——升级时无需重传参数。
 - **危险路径守卫**：拒绝 `/`、`/usr`、`/etc`、`/var` 等系统目录作为安装路径。
 - **与官方 install.sh 兼容**：停用其模板化 `easytier@*` 实例，避免两个 easytier
   进程同时运行抢端口。
@@ -249,8 +277,13 @@ sudo ./deploy.sh --exec-args "新的启动参数"
 
 **Q: 如何升级 EasyTier？**
 
-直接重跑 `sudo ./deploy.sh`（参数同上次，或重新指定）。脚本会下载最新版、原子替换
-二进制、重启服务。启动参数若未通过 `--exec-args` / `EXEC_ARGS` 传入，会交互式提示。
+- **保持原启动参数升级**（推荐）：`sudo ./deploy.sh update`
+  脚本读取上次持久化的 `easytier.args`，下载最新版原子替换二进制并重启服务，**全程不提示输入参数**。已是最新版会自动跳过。
+- **同时改启动参数**：用 `install` 重装并指定新参数：
+  ```bash
+  sudo ./deploy.sh --exec-args "新的启动参数"
+  ```
+  这会重写 systemd 单元并重启。
 
 ---
 
